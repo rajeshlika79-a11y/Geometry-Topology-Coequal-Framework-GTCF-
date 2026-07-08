@@ -1,0 +1,74 @@
+"""
+GTCF Section 6 verification core.
+
+Two independent computations:
+  1. compute_bend_angle(coords_domain1, coords_domain2)
+       -> G(S): geometric descriptor (inter-domain bend angle, degrees)
+  2. compute_persistence(coords) + compare_persistence(dgm1, dgm2)
+       -> T(S): topological descriptor (persistence diagram) and
+          bottleneck distance between two diagrams
+
+These are the two functors G and T from the paper, implemented directly
+on Calpha coordinate arrays (N x 3 numpy arrays).
+"""
+
+import numpy as np
+from ripser import ripser
+from persim import bottleneck
+
+
+def _principal_axis(coords):
+    """Return the first principal axis (unit vector) of a point cloud via SVD."""
+    centered = coords - coords.mean(axis=0)
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    return vt[0]  # direction of greatest variance
+
+
+def compute_bend_angle(coords_domain1, coords_domain2):
+    """
+    G(S): angle (degrees) between the principal axes of two domains
+    (e.g. alpha-monomer CAs and beta-monomer CAs of a tubulin dimer).
+    This is the geometric descriptor used in Theorem 1.
+    """
+    axis1 = _principal_axis(coords_domain1)
+    axis2 = _principal_axis(coords_domain2)
+    cos_theta = np.clip(np.abs(np.dot(axis1, axis2)), -1.0, 1.0)
+    angle_rad = np.arccos(cos_theta)
+    return np.degrees(angle_rad)
+
+
+def compute_persistence(coords, maxdim=1):
+    """
+    T(S): persistence diagram of the Calpha point cloud via Vietoris-Rips
+    filtration (ripser). Returns list of (birth, death) arrays per
+    homological dimension H0, H1, ...
+    """
+    result = ripser(coords, maxdim=maxdim)
+    return result['dgms']
+
+
+def compare_persistence(dgms1, dgms2, dim=1):
+    """
+    Bottleneck distance between two persistence diagrams at a given
+    homological dimension. Near-zero => T(S1) ~= T(S2) (topologically
+    equivalent at that dimension); large => T(S1) !~= T(S2).
+    """
+    return bottleneck(dgms1[dim], dgms2[dim])
+
+
+def betti_numbers(dgms, epsilon=None):
+    """
+    Count topological features (Betti numbers) alive at a given
+    filtration radius epsilon. If epsilon is None, use each
+    diagram's max finite death time as a representative scale.
+    """
+    counts = []
+    for dgm in dgms:
+        if epsilon is None:
+            finite = dgm[np.isfinite(dgm[:, 1])]
+            eps = finite[:, 1].max() if len(finite) else 0.0
+        else:
+            eps = epsilon
+        alive = np.sum((dgm[:, 0] <= eps) & ((dgm[:, 1] > eps) | np.isinf(dgm[:, 1])))
+        counts.append(int(alive))
+    return counts
