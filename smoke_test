@@ -1,0 +1,69 @@
+"""
+Smoke test for gtcf_core.py using SYNTHETIC data (not real PDB coordinates).
+Purpose: confirm the bend-angle and persistent-homology pipeline is
+mathematically correct before running it on real 1JFF / 1SA0 coordinates.
+
+We build a synthetic "domain pair" as two rod-like point clouds (standing
+in for the alpha and beta monomer backbones), then bend the second rod by
+a known angle, exactly mirroring the tubulin comparison in the paper.
+"""
+import numpy as np
+from gtcf_core import compute_bend_angle, compute_persistence, compare_persistence, betti_numbers
+
+np.random.seed(0)
+
+def make_rod(n=60, length=20.0, noise=0.3, origin=(0, 0, 0)):
+    t = np.linspace(0, length, n)
+    pts = np.stack([t, np.zeros(n), np.zeros(n)], axis=1)
+    pts += np.random.normal(scale=noise, size=pts.shape)
+    return pts + np.array(origin)
+
+def rotate(pts, angle_deg, axis=(0, 0, 1), pivot=None):
+    angle = np.radians(angle_deg)
+    if pivot is None:
+        pivot = pts[0]
+    axis = np.array(axis) / np.linalg.norm(axis)
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+    return (pts - pivot) @ R.T + pivot
+
+# Domain 1 ("alpha monomer"): fixed rod
+domain1 = make_rod(origin=(0, 0, 0))
+
+# Domain 2 ("beta monomer"), STRAIGHT case: continues collinear with domain1
+domain2_straight = make_rod(origin=(20, 0, 0))
+
+# Domain 2, CURVED case: same rod bent by a known 13 degrees at the joint
+domain2_curved = rotate(make_rod(origin=(20, 0, 0)), angle_deg=13.0, pivot=np.array([20, 0, 0]))
+
+print("=== G(S): bend angle ===")
+angle_straight = compute_bend_angle(domain1, domain2_straight)
+angle_curved = compute_bend_angle(domain1, domain2_curved)
+print(f"Straight-case G:  {angle_straight:.2f} deg  (expected ~0)")
+print(f"Curved-case   G:  {angle_curved:.2f} deg  (expected ~13)")
+
+# Full structure = domain1 + domain2 concatenated (whole-chain point cloud)
+struct_straight = np.vstack([domain1, domain2_straight])
+struct_curved = np.vstack([domain1, domain2_curved])
+
+print("\n=== T(S): persistent homology ===")
+dgms_straight = compute_persistence(struct_straight, maxdim=1)
+dgms_curved = compute_persistence(struct_curved, maxdim=1)
+
+bd_h0 = compare_persistence(dgms_straight, dgms_curved, dim=0)
+bd_h1 = compare_persistence(dgms_straight, dgms_curved, dim=1)
+print(f"Bottleneck distance H0 (components): {bd_h0:.4f}")
+print(f"Bottleneck distance H1 (loops):      {bd_h1:.4f}")
+
+print(f"Betti numbers (straight): {betti_numbers(dgms_straight)}")
+print(f"Betti numbers (curved):   {betti_numbers(dgms_curved)}")
+
+print("\n=== Verdict ===")
+g_differs = abs(angle_curved - angle_straight) > 5.0
+t_equivalent = bd_h0 < 1.0 and bd_h1 < 1.0
+print(f"G(S1) != G(S2): {g_differs}")
+print(f"T(S1) ~= T(S2): {t_equivalent}")
+if g_differs and t_equivalent:
+    print("=> Structural Blindness (Theorem 1 pattern) reproduced on synthetic data.")
+else:
+    print("=> Pattern NOT reproduced -- check pipeline before trusting real-data run.")
