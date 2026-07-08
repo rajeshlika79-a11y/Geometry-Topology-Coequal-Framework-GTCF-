@@ -1,0 +1,145 @@
+"""
+GTCF Section 6 — Full Computational Verification
+==================================================
+
+Runs the exact procedure specified in the paper for BOTH theorems:
+
+  Theorem 1 (Structural Blindness):   1JFF (straight) vs 1SA0 (curved)
+  Theorem 2 (Topological Sensitivity): 4JQO (unknotted) vs 3KZK (knotted)
+
+Requires internet access to RCSB PDB (files.rcsb.org). This script was
+built and unit-tested (see smoke_test.py) in a sandbox WITHOUT direct
+RCSB access, so run this on a machine/environment that can reach
+https://files.rcsb.org before trusting its printed conclusions.
+
+Install dependencies:
+    pip install biopython ripser persim numpy scipy
+
+Usage:
+    python run_verification.py
+"""
+import urllib.request
+import numpy as np
+from Bio.PDB import PDBParser
+from gtcf_core import compute_bend_angle, compute_persistence, compare_persistence, betti_numbers
+
+PDB_IDS = {
+    "1jff": "https://files.rcsb.org/download/1JFF.pdb",
+    "1sa0": "https://files.rcsb.org/download/1SA0.pdb",
+    "4jqo": "https://files.rcsb.org/download/4JQO.pdb",
+    "3kzk": "https://files.rcsb.org/download/3KZK.pdb",
+}
+
+
+def fetch_pdb(pdb_id, out_dir="data"):
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    path = f"{out_dir}/{pdb_id}.pdb"
+    urllib.request.urlretrieve(PDB_IDS[pdb_id], path)
+    return path
+
+
+def get_ca_coords(pdb_path, pdb_id, chain_id=None):
+    """Extract Calpha coordinates, optionally restricted to one chain."""
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure(pdb_id, pdb_path)
+    coords = []
+    for model in structure:
+        for chain in model:
+            if chain_id is not None and chain.id != chain_id:
+                continue
+            for residue in chain:
+                if "CA" in residue:
+                    coords.append(residue["CA"].get_coord())
+        break  # first model only
+    return np.array(coords)
+
+
+def theorem1_tubulin():
+    print("=" * 60)
+    print("THEOREM 1: Structural Blindness -- 1JFF vs 1SA0")
+    print("=" * 60)
+
+    p1jff = fetch_pdb("1jff")
+    p1sa0 = fetch_pdb("1sa0")
+
+    # G(S): bend angle between alpha (chain A) and beta (chain B) monomers
+    alpha_1jff = get_ca_coords(p1jff, "1jff", chain_id="A")
+    beta_1jff = get_ca_coords(p1jff, "1jff", chain_id="B")
+    alpha_1sa0 = get_ca_coords(p1sa0, "1sa0", chain_id="A")
+    beta_1sa0 = get_ca_coords(p1sa0, "1sa0", chain_id="B")
+
+    g_1jff = compute_bend_angle(alpha_1jff, beta_1jff)
+    g_1sa0 = compute_bend_angle(alpha_1sa0, beta_1sa0)
+    print(f"G(1JFF) bend angle: {g_1jff:.2f} deg")
+    print(f"G(1SA0) bend angle: {g_1sa0:.2f} deg")
+    print(f"G differs by:       {abs(g_1sa0 - g_1jff):.2f} deg")
+
+    # T(S): persistence diagrams of the full dimer point cloud
+    full_1jff = get_ca_coords(p1jff, "1jff")
+    full_1sa0 = get_ca_coords(p1sa0, "1sa0")
+    dgms_1jff = compute_persistence(full_1jff, maxdim=1)
+    dgms_1sa0 = compute_persistence(full_1sa0, maxdim=1)
+
+    bd_h0 = compare_persistence(dgms_1jff, dgms_1sa0, dim=0)
+    bd_h1 = compare_persistence(dgms_1jff, dgms_1sa0, dim=1)
+    print(f"Bottleneck distance H0: {bd_h0:.4f}")
+    print(f"Bottleneck distance H1: {bd_h1:.4f}")
+    print(f"Betti numbers 1JFF: {betti_numbers(dgms_1jff)}")
+    print(f"Betti numbers 1SA0: {betti_numbers(dgms_1sa0)}")
+
+    g_differs = abs(g_1sa0 - g_1jff) > 5.0
+    # Threshold for "topologically equivalent" should be tuned relative to
+    # the point cloud's natural length scale -- inspect bd_h0/bd_h1 values
+    # directly rather than trusting a fixed cutoff blindly.
+    t_equivalent = bd_h0 < np.percentile(full_1jff.std(axis=0), 50) and bd_h1 < np.percentile(full_1jff.std(axis=0), 50)
+    print(f"\nG(S1) != G(S2): {g_differs}")
+    print(f"T(S1) ~= T(S2) (heuristic threshold, inspect manually): {t_equivalent}")
+    return dict(g_1jff=g_1jff, g_1sa0=g_1sa0, bd_h0=bd_h0, bd_h1=bd_h1)
+
+
+def theorem2_knot():
+    print("\n" + "=" * 60)
+    print("THEOREM 2: Topological Sensitivity -- 4JQO vs 3KZK")
+    print("=" * 60)
+
+    p4jqo = fetch_pdb("4jqo")
+    p3kzk = fetch_pdb("3kzk")
+
+    full_4jqo = get_ca_coords(p4jqo, "4jqo")
+    full_3kzk = get_ca_coords(p3kzk, "3kzk")
+
+    # G(S): coarse global descriptor -- radius of gyration + backbone length
+    def coarse_geom(coords):
+        centered = coords - coords.mean(axis=0)
+        rg = np.sqrt((centered ** 2).sum(axis=1).mean())
+        return rg
+
+    g_4jqo = coarse_geom(full_4jqo)
+    g_3kzk = coarse_geom(full_3kzk)
+    print(f"G(4JQO) radius of gyration: {g_4jqo:.2f} A")
+    print(f"G(3KZK) radius of gyration: {g_3kzk:.2f} A")
+    print(f"G relative difference: {abs(g_4jqo - g_3kzk) / g_4jqo * 100:.1f}%")
+
+    # T(S): persistence diagrams
+    dgms_4jqo = compute_persistence(full_4jqo, maxdim=1)
+    dgms_3kzk = compute_persistence(full_3kzk, maxdim=1)
+    bd_h1 = compare_persistence(dgms_4jqo, dgms_3kzk, dim=1)
+    print(f"Bottleneck distance H1 (loops): {bd_h1:.4f}")
+    print(f"Betti numbers 4JQO: {betti_numbers(dgms_4jqo)}")
+    print(f"Betti numbers 3KZK: {betti_numbers(dgms_3kzk)}")
+    print("\nNote: standard Vietoris-Rips persistent homology on the raw")
+    print("Calpha cloud does NOT directly detect knot type (knotting is a")
+    print("property of the embedding of the closed/capped curve in R^3,")
+    print("not of the Rips complex of its point cloud). A real knot-invariant")
+    print("computation requires a dedicated method (e.g. Alexander/Jones")
+    print("polynomial via KnotProt, or the KMT reduction algorithm), which")
+    print("this script does not implement. Treat the bottleneck distance")
+    print("above as a supplementary geometric-shape signal only, and cite")
+    print("the published knot-detection result (Section 4 of the paper)")
+    print("as the primary evidence for Theorem 2, not this script's output.")
+
+
+if __name__ == "__main__":
+    theorem1_tubulin()
+    theorem2_knot()
